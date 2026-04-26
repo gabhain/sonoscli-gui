@@ -8,6 +8,9 @@ on:
       - 'v*'
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build-macos:
     runs-on: macos-latest
@@ -31,6 +34,9 @@ jobs:
             fyne package -os darwin
           fi
 
+      - name: Zip macOS App
+        run: zip -r sonoscli-gui-macos.zip sonoscli-gui.app
+
       - name: Create macOS .pkg
         run: |
           pkgbuild --component sonoscli-gui.app --install-location /Applications --identifier com.sonoscli.gui sonoscli-gui.pkg
@@ -40,7 +46,7 @@ jobs:
         with:
           name: sonoscli-gui-macos
           path: |
-            sonoscli-gui.app
+            sonoscli-gui-macos.zip
             sonoscli-gui.pkg
 
   build-linux:
@@ -70,11 +76,14 @@ jobs:
             fyne package -os linux
           fi
 
+      - name: Tar Linux Binary
+        run: tar -czvf sonoscli-gui-linux.tar.gz sonoscli-gui
+
       - name: Upload Linux Artifact
         uses: actions/upload-artifact@v4
         with:
           name: sonoscli-gui-linux
-          path: sonoscli-gui.tar.gz
+          path: sonoscli-gui-linux.tar.gz
 
   build-windows:
     runs-on: windows-latest
@@ -116,9 +125,9 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            sonoscli-gui-macos/sonoscli-gui.app
+            sonoscli-gui-macos/sonoscli-gui-macos.zip
             sonoscli-gui-macos/sonoscli-gui.pkg
-            sonoscli-gui-linux/sonoscli-gui.tar.gz
+            sonoscli-gui-linux/sonoscli-gui-linux.tar.gz
             sonoscli-gui-windows/sonoscli-gui.exe
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
