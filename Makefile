@@ -10,7 +10,7 @@ all: build
 deps:
 	@chmod +x scripts/install_deps.sh
 	./scripts/install_deps.sh
-	go install fyne.io/fyne/v2/cmd/fyne@latest
+	go install fyne.io/tools/cmd/fyne@latest
 	go mod download
 
 

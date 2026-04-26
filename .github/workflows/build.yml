@@ -21,7 +21,7 @@ jobs:
           go-version: '1.26'
 
       - name: Install Fyne CLI
-        run: go install fyne.io/fyne/v2/cmd/fyne@latest
+        run: go install fyne.io/tools/cmd/fyne@latest
 
       - name: Package macOS App
         run: |
@@ -60,7 +60,7 @@ jobs:
           sudo apt-get install -y libgl1-mesa-dev xorg-dev libwayland-dev libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev
 
       - name: Install Fyne CLI
-        run: go install fyne.io/fyne/v2/cmd/fyne@latest
+        run: go install fyne.io/tools/cmd/fyne@latest
 
       - name: Package Linux App
         run: |
@@ -88,7 +88,7 @@ jobs:
           go-version: '1.26'
 
       - name: Install Fyne CLI
-        run: go install fyne.io/fyne/v2/cmd/fyne@latest
+        run: go install fyne.io/tools/cmd/fyne@latest
 
       - name: Package Windows App
         run: |
