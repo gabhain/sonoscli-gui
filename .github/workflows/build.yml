@@ -75,9 +75,18 @@ jobs:
           else
             fyne package -os linux
           fi
-
-      - name: Tar Linux Binary
-        run: tar -czvf sonoscli-gui-linux.tar.gz sonoscli-gui
+          # Fyne package usually creates sonoscli-gui.tar.gz or a binary named sonoscli-gui
+          if [ -f "sonoscli-gui.tar.gz" ]; then
+            mv sonoscli-gui.tar.gz sonoscli-gui-linux.tar.gz
+          elif [ -f "sonoscli-gui" ]; then
+            tar -czvf sonoscli-gui-linux.tar.gz sonoscli-gui
+          else
+            echo "Searching for produced files..."
+            ls -R
+            # Fallback: if we can't find it, try to build it normally and tar it
+            go build -o sonoscli-gui .
+            tar -czvf sonoscli-gui-linux.tar.gz sonoscli-gui
+          fi
 
       - name: Upload Linux Artifact
         uses: actions/upload-artifact@v4
