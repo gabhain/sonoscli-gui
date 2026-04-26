@@ -10,14 +10,18 @@ import (
 )
 
 type Config struct {
-	DefaultRoom string `json:"defaultRoom,omitempty"`
-	Format      string `json:"format,omitempty"`
+	DefaultRoom string   `json:"defaultRoom,omitempty"`
+	Format      string   `json:"format,omitempty"`
+	KnownIPs    []string `json:"knownIPs,omitempty"`
+	LastRoomID  string   `json:"lastRoomID,omitempty"`
 }
 
 func (c Config) Normalize() Config {
 	out := Config{
 		DefaultRoom: strings.TrimSpace(c.DefaultRoom),
 		Format:      strings.ToLower(strings.TrimSpace(c.Format)),
+		KnownIPs:    c.KnownIPs,
+		LastRoomID:  strings.TrimSpace(c.LastRoomID),
 	}
 	if out.Format == "" {
 		out.Format = "plain"
