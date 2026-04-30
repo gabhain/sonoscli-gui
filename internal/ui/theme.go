@@ -19,18 +19,19 @@ func (m SonosTheme) Color(name fyne.ThemeColorName, variant fyne.ThemeVariant) c
 		case theme.ColorNamePrimary:
 			return color.NRGBA{R: 255, G: 165, B: 0, A: 255} // Sonos Orange
 		}
+		return theme.DarkTheme().Color(name, variant)
 	}
-	return theme.DefaultTheme().Color(name, variant)
+	return theme.LightTheme().Color(name, variant)
 }
 
 func (m SonosTheme) Icon(name fyne.ThemeIconName) fyne.Resource {
-	return theme.DefaultTheme().Icon(name)
+	return theme.DarkTheme().Icon(name)
 }
 
 func (m SonosTheme) Font(style fyne.TextStyle) fyne.Resource {
-	return theme.DefaultTheme().Font(style)
+	return theme.DarkTheme().Font(style)
 }
 
 func (m SonosTheme) Size(name fyne.ThemeSizeName) float32 {
-	return theme.DefaultTheme().Size(name)
+	return theme.DarkTheme().Size(name)
 }

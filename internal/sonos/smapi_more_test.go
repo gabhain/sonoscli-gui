@@ -87,7 +87,7 @@ func TestNewSMAPIClient(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSMAPIClient: %v", err)
 	}
-	if sm.HouseholdID != "Sonos_TEST" || sm.DeviceID != "RINCONDEVICEID" {
+	if sm.HouseholdID != "Sonos_TEST" || sm.DeviceID != "DEVICEID" {
 		t.Fatalf("unexpected ids: household=%q device=%q", sm.HouseholdID, sm.DeviceID)
 	}
 }

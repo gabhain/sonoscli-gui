@@ -24,6 +24,7 @@ type ssdpUDPConn interface {
 	WriteToUDP(b []byte, addr *net.UDPAddr) (int, error)
 	ReadFromUDP(b []byte) (int, *net.UDPAddr, error)
 	SetReadDeadline(t time.Time) error
+	LocalAddr() net.Addr
 	Close() error
 }
 
@@ -50,15 +51,55 @@ func ssdpDiscover(ctx context.Context, timeout time.Duration) ([]ssdpResult, err
 	}
 	defer conn.Close()
 
+	if laddr, ok := conn.LocalAddr().(*net.UDPAddr); ok {
+		slog.Debug("ssdp: bound locally", "addr", laddr.String())
+	}
+
 	dst := &net.UDPAddr{IP: net.ParseIP("239.255.255.250"), Port: 1900}
 
-	// UDP is unreliable, send multiple times.
-	for i := 0; i < 3; i++ {
-		if _, err := conn.WriteToUDP([]byte(payload), dst); err != nil {
-			return nil, err
+	// Try to send M-SEARCH on all available multicast-capable interfaces.
+	// This helps on macOS where the default route might not include multicast.
+	ifaces, _ := net.Interfaces()
+	sentCount := 0
+	for _, iface := range ifaces {
+		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagMulticast == 0 || iface.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		
+		// Get addresses for this interface
+		addrs, _ := iface.Addrs()
+		for _, addr := range addrs {
+			ipNet, ok := addr.(*net.IPNet)
+			if !ok || ipNet.IP.To4() == nil {
+				continue
+			}
+
+			// Bind to specific interface IP and send
+			localConn, err := ssdpListenUDP("udp4", &net.UDPAddr{IP: ipNet.IP, Port: 0})
+			if err != nil {
+				continue
+			}
+			
+			for i := 0; i < 2; i++ {
+				if _, err := localConn.WriteToUDP([]byte(payload), dst); err != nil {
+					slog.Debug("ssdp: write error on interface", "iface", iface.Name, "ip", ipNet.IP.String(), "err", err)
+				} else {
+					sentCount++
+				}
+			}
+			localConn.Close()
 		}
 	}
-	slog.Debug("ssdp: sent M-SEARCH", "dst", dst.String())
+
+	// Fallback: if no specific interface succeeded, try the default connection.
+	if sentCount == 0 {
+		for i := 0; i < 3; i++ {
+			if _, err := conn.WriteToUDP([]byte(payload), dst); err != nil {
+				slog.Debug("ssdp: fallback write error", "err", err)
+			}
+		}
+	}
+	slog.Debug("ssdp: sent M-SEARCH", "count", sentCount, "dst", dst.String())
 
 	deadline := ssdpNow().Add(timeout)
 	byLocation := map[string]ssdpResult{}
@@ -85,8 +126,11 @@ Loop:
 			if nerr, ok := err.(net.Error); ok && nerr.Timeout() {
 				continue
 			}
-			// Some platforms can return spurious read errors while sockets are closing.
-			break
+			if strings.Contains(err.Error(), "use of closed network connection") {
+				break
+			}
+			slog.Debug("ssdp: read error", "err", err)
+			continue
 		}
 		msg := buf[:n]
 		res, ok := parseSSDPResponse(msg)

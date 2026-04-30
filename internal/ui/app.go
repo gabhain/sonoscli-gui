@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"fyne.io/fyne/v2"
@@ -21,6 +22,7 @@ import (
 	"sonoscli-gui/internal/appconfig"
 	"sonoscli-gui/internal/scenes"
 	"sonoscli-gui/internal/sonos"
+	"sonoscli-gui/internal/web"
 )
 
 type SonosApp struct {
@@ -39,7 +41,7 @@ type SonosApp struct {
 	// Now Playing State
 	CurrentRoomID string
 	RoomUI        map[string]*RoomUI
-	
+
 	// Scenes
 	ScenesStore scenes.Store
 	ScenesList  *fyne.Container
@@ -53,9 +55,18 @@ type SonosApp struct {
 
 	// Events
 	Events *EventManager
+
+	// Web Server
+	WebSrv       *web.WebServer
+	WebToggle    *widget.Check
+	WebPortEntry *widget.Entry
+
+	lastRefresh time.Time
+	refreshMu   sync.Mutex
 }
 
 type RoomUI struct {
+	RoomID       string
 	Container    *fyne.Container
 	NameLabel    *widget.Label
 	TrackLabel   *widget.Label
@@ -63,32 +74,32 @@ type RoomUI struct {
 	AlbumArt     *canvas.Image
 	PlayPauseBtn *widget.Button
 	VolSlider    *widget.Slider
-	
+
 	// Progress
-	Progress     *widget.ProgressBar
-	TimeLabel    *widget.Label
+	Progress  *widget.ProgressBar
+	TimeLabel *widget.Label
 
 	// Tabs
 	Tabs *container.AppTabs
-	
+
 	// Lists & Containers
 	QueueList     *fyne.Container
 	FavoritesList *fyne.Container
 	GroupList     *fyne.Container
 	AudioSettings *fyne.Container
 	InputsList    *fyne.Container
-	
+
 	// Audio Settings Widgets
 	BassSlider   *widget.Slider
 	TrebleSlider *widget.Slider
 	LoudnessBtn  *widget.Button
 	NightBtn     *widget.Button
 	SpeechBtn    *widget.Button
-	
+
 	// Line Out (Port/Connect)
 	LineOutSelect *widget.Select
 	LineOutCard   fyne.CanvasObject
-	
+
 	// Group Volume
 	GroupVolSlider *widget.Slider
 	GroupMuteBtn   *widget.Button
@@ -108,6 +119,15 @@ func NewSonosApp(a fyne.App, w fyne.Window) *SonosApp {
 		TokenStore:  ts,
 		ConfigStore: cs,
 		Config:      cfg,
+		WebSrv:      web.NewWebServer(),
+	}
+	sa.WebSrv.OnTopologyUpdate = func(top sonos.Topology) {
+		sa.Topology = top
+		fyne.Do(func() {
+			sa.StatusLabel.SetText(fmt.Sprintf("Found %d groups and %d rooms (Web).", len(top.Groups), len(top.ByName)))
+			sa.Sidebar.Refresh()
+			sa.Sidebar.OpenAllBranches()
+		})
 	}
 	sa.Events = NewEventManager(sa)
 	sa.Events.Start()
@@ -119,10 +139,10 @@ func NewSonosApp(a fyne.App, w fyne.Window) *SonosApp {
 func makeCard(title string, content fyne.CanvasObject) fyne.CanvasObject {
 	cardBg := canvas.NewRectangle(theme.InputBackgroundColor())
 	cardBg.CornerRadius = 10
-	
+
 	titleLabel := widget.NewLabelWithStyle(title, fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
 	header := container.NewPadded(titleLabel)
-	
+
 	return container.NewStack(
 		cardBg,
 		container.NewBorder(header, nil, nil, nil, container.NewPadded(content)),
@@ -204,46 +224,107 @@ func (sa *SonosApp) buildUI() {
 	)
 
 	sa.Sidebar.OnSelected = func(id widget.TreeNodeID) {
-		if id == "" || id == "root" { return }
+		if id == "" || id == "root" {
+			return
+		}
 		sa.showRoom(id)
 	}
 
 	sa.MainArea = container.NewStack(widget.NewLabel("Select a room to start"))
 
 	refreshBtn := widget.NewButtonWithIcon("", theme.ViewRefreshIcon(), func() {
-		go sa.Discover()
+		go sa.RefreshTopology()
 	})
-	
+
+	sa.ScenesList = container.NewVBox()
+	scenesScroll := container.NewVScroll(sa.ScenesList)
+
+	saveSceneBtn := widget.NewButtonWithIcon("Save Current as Scene", theme.DocumentSaveIcon(), sa.saveCurrentScene)
+
+	scenesTab := container.NewBorder(saveSceneBtn, nil, nil, nil, scenesScroll)
+
+	left := container.NewBorder(container.NewHBox(widget.NewLabel("Rooms"), layout.NewSpacer(), refreshBtn), nil, nil, nil, sa.Sidebar)
+
+	sidebarTabs := container.NewAppTabs(
+		container.NewTabItem("Rooms", left),
+		container.NewTabItem("Scenes", scenesTab),
+		container.NewTabItem("Settings", sa.buildSettingsUI()),
+	)
+
+	sa.Window.SetContent(container.NewBorder(nil, sa.StatusLabel, sidebarTabs, nil, sa.MainArea))
+
+	go sa.refreshScenes()
+}
+
+func (sa *SonosApp) buildSettingsUI() fyne.CanvasObject {
+	sa.WebPortEntry = widget.NewEntry()
+	sa.WebPortEntry.SetText("8080")
+
+	sa.WebToggle = widget.NewCheck("Enable Web GUI", func(checked bool) {
+		if checked {
+			port, _ := strconv.Atoi(sa.WebPortEntry.Text)
+			if port <= 0 {
+				port = 8080
+			}
+			sa.WebPortEntry.Disable()
+			go sa.WebSrv.Start(port)
+		} else {
+			go sa.WebSrv.Stop()
+			sa.WebPortEntry.Enable()
+		}
+	})
+
+	webConfig := container.NewVBox(
+		widget.NewLabelWithStyle("Web Server", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
+		container.NewBorder(nil, nil, widget.NewLabel("Port:"), nil, sa.WebPortEntry),
+		sa.WebToggle,
+		widget.NewSeparator(),
+	)
+
+	// Manual IP (Moved from sidebar)
 	manualIP := widget.NewEntry()
-	manualIP.SetPlaceHolder("Manual IP")
-	manualBtn := widget.NewButton("Connect", func() {
+	manualIP.SetPlaceHolder("Speaker IP Address")
+	manualBtn := widget.NewButton("Connect Manually", func() {
 		if manualIP.Text != "" {
 			go sa.DiscoverIP(manualIP.Text)
 		}
 	})
-	
-	manualContainer := container.NewBorder(nil, nil, nil, manualBtn, manualIP)
-
-	sa.ScenesList = container.NewVBox()
-	scenesScroll := container.NewVScroll(sa.ScenesList)
-	
-	saveSceneBtn := widget.NewButtonWithIcon("Save Current as Scene", theme.DocumentSaveIcon(), sa.saveCurrentScene)
-	
-	scenesTab := container.NewBorder(saveSceneBtn, nil, nil, nil, scenesScroll)
-
-	left := container.NewBorder(container.NewVBox(container.NewHBox(widget.NewLabel("Rooms"), layout.NewSpacer(), refreshBtn), manualContainer), nil, nil, nil, sa.Sidebar)
-	
-	sidebarTabs := container.NewAppTabs(
-		container.NewTabItem("Rooms", left),
-		container.NewTabItem("Scenes", scenesTab),
+	manualContainer := container.NewVBox(
+		widget.NewLabelWithStyle("Manual Connection", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
+		container.NewBorder(nil, nil, nil, manualBtn, manualIP),
+		widget.NewSeparator(),
 	)
 
-	split := container.NewHSplit(sidebarTabs, sa.MainArea)
-	split.Offset = 0.3
+	scaleLabel := widget.NewLabel(fmt.Sprintf("UI Scale: %.2f", sa.Config.UIScale))
+	scaleSlider := widget.NewSlider(0.5, 2.0)
+	scaleSlider.Step = 0.05
+	scaleSlider.Value = float64(sa.Config.UIScale)
+	scaleSlider.OnChanged = func(v float64) {
+		sa.Config.UIScale = float32(v)
+		scaleLabel.SetText(fmt.Sprintf("UI Scale: %.2f", sa.Config.UIScale))
+	}
 
-	sa.Window.SetContent(container.NewBorder(nil, sa.StatusLabel, nil, nil, split))
-	
-	go sa.refreshScenes()
+	saveBtn := widget.NewButton("Save Settings", func() {
+		sa.SaveConfig()
+	})
+
+	resetBtn := widget.NewButton("Reset UI Scale", func() {
+		sa.Config.UIScale = 1.0
+		scaleSlider.SetValue(1.0)
+		sa.SaveConfig()
+	})
+
+	return container.NewPadded(container.NewVScroll(container.NewVBox(
+		webConfig,
+		manualContainer,
+		widget.NewLabelWithStyle("User Interface", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
+		widget.NewLabel("Adjust the scale if the GUI is too small or too large."),
+		container.NewBorder(nil, nil, widget.NewLabel("0.5"), widget.NewLabel("2.0"), scaleSlider),
+		scaleLabel,
+		layout.NewSpacer(),
+		saveBtn,
+		resetBtn,
+	)))
 }
 
 func (sa *SonosApp) Start() {
@@ -254,7 +335,7 @@ func (sa *SonosApp) Start() {
 		}
 	}
 	// 2. Run background discovery
-	go sa.Discover()
+	go sa.RefreshTopology()
 }
 
 func (sa *SonosApp) updateConfig(ip string, roomID string) {
@@ -262,7 +343,10 @@ func (sa *SonosApp) updateConfig(ip string, roomID string) {
 	if ip != "" {
 		found := false
 		for _, k := range sa.Config.KnownIPs {
-			if k == ip { found = true; break }
+			if k == ip {
+				found = true
+				break
+			}
 		}
 		if !found {
 			sa.Config.KnownIPs = append(sa.Config.KnownIPs, ip)
@@ -275,7 +359,13 @@ func (sa *SonosApp) updateConfig(ip string, roomID string) {
 	}
 
 	if changed {
-		sa.ConfigStore.Save(sa.Config)
+		sa.SaveConfig()
+	}
+}
+
+func (sa *SonosApp) SaveConfig() {
+	if err := sa.ConfigStore.Save(sa.Config); err != nil {
+		slog.Error("Failed to save config", "err", err)
 	}
 }
 
@@ -288,7 +378,7 @@ func (sa *SonosApp) DiscoverIP(ip string) {
 
 	client := sonos.NewClient(ip, 2*time.Second)
 	sa.Client = client
-	
+
 	top, err := client.GetTopology(ctx)
 	if err != nil {
 		fyne.Do(func() {
@@ -299,55 +389,83 @@ func (sa *SonosApp) DiscoverIP(ip string) {
 
 	sa.Topology = top
 	sa.updateConfig(ip, "")
-	
+
 	fyne.Do(func() {
 		sa.StatusLabel.SetText(fmt.Sprintf("Found %d groups and %d rooms via manual IP.", len(top.Groups), len(top.ByName)))
 		sa.Sidebar.Refresh()
 		sa.Sidebar.OpenAllBranches()
-		
+
 		if sa.CurrentRoomID == "" && sa.Config.LastRoomID != "" {
 			sa.showRoom(sa.Config.LastRoomID)
 		}
 	})
 }
 
-func (sa *SonosApp) Discover() {
+func (sa *SonosApp) RefreshTopology() {
+	sa.refreshMu.Lock()
+	if time.Since(sa.lastRefresh) < 5*time.Second {
+		sa.refreshMu.Unlock()
+		return
+	}
+	sa.lastRefresh = time.Now()
+	sa.refreshMu.Unlock()
+
+	slog.Info("Refreshing topology...")
 	fyne.Do(func() {
 		sa.StatusLabel.SetText("Discovering speakers...")
 	})
+
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
 	devices, err := sonos.Discover(ctx, sonos.DiscoverOptions{Timeout: 10 * time.Second})
+	// Log even if we have an error, because Discover now falls through to subnet scan
 	if err != nil {
-		fyne.Do(func() {
-			sa.StatusLabel.SetText(fmt.Sprintf("Discovery error: %v", err))
-		})
-		return
+		slog.Debug("Discovery returned error", "err", err)
 	}
 
 	if len(devices) == 0 {
+		slog.Info("No speakers found via Discovery, trying known IPs...")
+		// Fallback to known IPs if discovery finds nothing
+		for _, ip := range sa.Config.KnownIPs {
+			client := sonos.NewClient(ip, 2*time.Second)
+			top, err := client.GetTopology(ctx)
+			if err == nil {
+				sa.updateTopology(top, ip)
+				return
+			}
+			slog.Debug("Known IP check failed", "ip", ip, "err", err)
+		}
+
 		fyne.Do(func() {
-			sa.StatusLabel.SetText("No speakers found.")
+			sa.StatusLabel.SetText("No speakers found. Check network or manual IP.")
 		})
 		return
 	}
 
 	client := sonos.NewClient(devices[0].IP, 2*time.Second)
 	sa.Client = client
-	
+
 	top, err := client.GetTopology(ctx)
 	if err != nil {
+		slog.Error("Failed to fetch topology", "err", err)
 		fyne.Do(func() {
 			sa.StatusLabel.SetText(fmt.Sprintf("Topology error: %v", err))
 		})
 		return
 	}
 
-	sa.Topology = top
+	sa.updateTopology(top, devices[0].IP)
 	for _, dev := range devices {
 		sa.updateConfig(dev.IP, "")
 	}
+}
+
+func (sa *SonosApp) updateTopology(top sonos.Topology, sourceIP string) {
+	sa.Topology = top
+
+	// Update WebServer topology
+	sa.WebSrv.UpdateTopology(top)
 
 	fyne.Do(func() {
 		sa.StatusLabel.SetText(fmt.Sprintf("Found %d groups and %d rooms.", len(top.Groups), len(top.ByName)))
@@ -363,7 +481,7 @@ func (sa *SonosApp) Discover() {
 func (sa *SonosApp) showRoom(id string) {
 	sa.CurrentRoomID = id
 	sa.updateConfig("", id)
-	
+
 	var targetIP string
 	var name string
 
@@ -396,7 +514,7 @@ func (sa *SonosApp) showRoom(id string) {
 		sa.MainArea.Objects = []fyne.CanvasObject{ui.Container}
 		sa.MainArea.Refresh()
 	})
-	
+
 	go sa.updateRoomStatus(ui, targetIP)
 	go sa.updateAudioSettingsUI(ui, targetIP)
 	go sa.updateFavorites(ui, targetIP)
@@ -406,14 +524,16 @@ func (sa *SonosApp) showRoom(id string) {
 }
 
 func (sa *SonosApp) createRoomUI(name, ip, id string) *RoomUI {
-	ui := &RoomUI{}
-	
+	ui := &RoomUI{RoomID: id}
+
 	ui.NameLabel = widget.NewLabelWithStyle(name, fyne.TextAlignCenter, fyne.TextStyle{Bold: true})
 	ui.TrackLabel = widget.NewLabelWithStyle("No Track", fyne.TextAlignCenter, fyne.TextStyle{Bold: true})
+	ui.TrackLabel.Wrapping = fyne.TextWrapWord
 	ui.ArtistLabel = widget.NewLabelWithStyle("", fyne.TextAlignCenter, fyne.TextStyle{Italic: true})
-	ui.AlbumArt = canvas.NewImageFromResource(theme.BrokenImageIcon())
+	ui.ArtistLabel.Wrapping = fyne.TextWrapWord
+	ui.AlbumArt = canvas.NewImageFromResource(theme.MediaMusicIcon())
 	ui.AlbumArt.FillMode = canvas.ImageFillContain
-	ui.AlbumArt.SetMinSize(fyne.NewSize(250, 250))
+	ui.AlbumArt.SetMinSize(fyne.NewSize(150, 150))
 
 	ui.Progress = widget.NewProgressBar()
 	ui.Progress.Max = 100
@@ -460,9 +580,9 @@ func (sa *SonosApp) createRoomUI(name, ip, id string) *RoomUI {
 		container.NewPadded(container.NewBorder(nil, nil, widget.NewIcon(theme.VolumeDownIcon()), widget.NewIcon(theme.VolumeUpIcon()), ui.VolSlider)),
 	)
 
-	nowPlaying := container.NewAdaptiveGrid(2,
+	nowPlaying := container.NewVBox(
 		container.NewPadded(container.NewCenter(ui.AlbumArt)),
-		container.NewCenter(nowPlayingInfo),
+		container.NewPadded(nowPlayingInfo),
 	)
 
 	// Audio Settings
@@ -470,7 +590,7 @@ func (sa *SonosApp) createRoomUI(name, ip, id string) *RoomUI {
 	ui.BassSlider.OnChanged = func(v float64) { go client.SetEQ(context.Background(), "Bass", int(v)) }
 	ui.TrebleSlider = widget.NewSlider(-10, 10)
 	ui.TrebleSlider.OnChanged = func(v float64) { go client.SetEQ(context.Background(), "Treble", int(v)) }
-	
+
 	ui.LoudnessBtn = widget.NewButton("Loudness", func() {
 		go func() {
 			ctx := context.Background()
@@ -499,9 +619,12 @@ func (sa *SonosApp) createRoomUI(name, ip, id string) *RoomUI {
 	ui.LineOutSelect = widget.NewSelect([]string{"Variable", "Fixed", "Pass-Through"}, func(s string) {
 		mode := 0
 		switch s {
-		case "Variable": mode = 0
-		case "Fixed": mode = 1
-		case "Pass-Through": mode = 2
+		case "Variable":
+			mode = 0
+		case "Fixed":
+			mode = 1
+		case "Pass-Through":
+			mode = 2
 		}
 		go func() {
 			client.SetOutputFixed(context.Background(), mode)
@@ -548,7 +671,7 @@ func (sa *SonosApp) createRoomUI(name, ip, id string) *RoomUI {
 	refreshInputsBtn := widget.NewButtonWithIcon("Refresh Inputs", theme.ViewRefreshIcon(), func() { go sa.updateInputsUI(ui, ip) })
 
 	ui.Tabs = container.NewAppTabs(
-		container.NewTabItemWithIcon("Now Playing", theme.MediaPlayIcon(), container.NewPadded(nowPlaying)),
+		container.NewTabItemWithIcon("Now Playing", theme.MediaPlayIcon(), container.NewPadded(container.NewVScroll(nowPlaying))),
 		container.NewTabItemWithIcon("Audio", theme.SettingsIcon(), container.NewPadded(container.NewVScroll(ui.AudioSettings))),
 		container.NewTabItemWithIcon("Grouping", theme.SettingsIcon(), container.NewPadded(container.NewVScroll(groupingContent))),
 		container.NewTabItemWithIcon("Inputs", theme.SettingsIcon(), container.NewBorder(refreshInputsBtn, nil, nil, nil, container.NewVScroll(ui.InputsList))),
@@ -574,7 +697,7 @@ func (sa *SonosApp) updateInputsUI(ui *RoomUI, ip string) {
 	}
 
 	items, _ := sonos.ParseDIDLItems(res.Result)
-	
+
 	var myUUID string
 	for _, m := range sa.Topology.ByIP {
 		if m.IP == ip && m.UUID != "" {
@@ -585,7 +708,7 @@ func (sa *SonosApp) updateInputsUI(ui *RoomUI, ip string) {
 
 	fyne.Do(func() {
 		ui.InputsList.Objects = nil
-		
+
 		found := false
 		if myUUID != "" {
 			tvURI := "x-sonos-htastream:" + myUUID + ":spdif"
@@ -618,9 +741,18 @@ func (sa *SonosApp) updateInputsUI(ui *RoomUI, ip string) {
 	})
 }
 
+func truncate(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	return s[:max-3] + "..."
+}
+
 func parseDuration(s string) time.Duration {
 	parts := strings.Split(s, ":")
-	if len(parts) != 3 { return 0 }
+	if len(parts) != 3 {
+		return 0
+	}
 	h, _ := strconv.Atoi(parts[0])
 	m, _ := strconv.Atoi(parts[1])
 	s2, _ := strconv.Atoi(parts[2])
@@ -630,79 +762,185 @@ func parseDuration(s string) time.Duration {
 func (sa *SonosApp) updateRoomStatus(ui *RoomUI, ip string) {
 	client := sonos.NewClient(ip, 2*time.Second)
 	ctx := context.Background()
-	
-	pos, err := client.GetPositionInfo(ctx)
-	vol, _ := client.GetVolume(ctx)
-	info, _ := client.GetTransportInfo(ctx)
 
-	fyne.Do(func() {
-		if err == nil {
-			uri := strings.ToLower(pos.TrackURI)
-			if strings.Contains(uri, "htastream") || strings.Contains(uri, "hdmi") || strings.Contains(uri, "spdif") {
-				ui.TrackLabel.SetText("TV Audio")
-				ui.ArtistLabel.SetText("")
-				ui.AlbumArt.Resource = theme.MediaVideoIcon()
-				ui.Progress.Hide()
-				ui.TimeLabel.Hide()
-			} else if strings.Contains(uri, "line-in") || strings.Contains(uri, "linein") {
-				ui.TrackLabel.SetText("Line-In")
-				ui.ArtistLabel.SetText("")
-				ui.AlbumArt.Resource = theme.SettingsIcon()
-				ui.Progress.Hide()
-				ui.TimeLabel.Hide()
-			} else if it, ok := sonos.ParseNowPlaying(pos.TrackMeta); ok {
-				ui.TrackLabel.SetText(it.Title)
-				ui.ArtistLabel.SetText(it.Artist)
-				if it.AlbumArtURI != "" {
-					artURL := sonos.AlbumArtURL(ip, it.AlbumArtURI)
-					res, err := fyne.LoadResourceFromURLString(artURL)
-					if err == nil {
-						ui.AlbumArt.Resource = res
+	go func() {
+		pos, err := client.GetPositionInfo(ctx)
+		vol, _ := client.GetVolume(ctx)
+		info, _ := client.GetTransportInfo(ctx)
+		media, _ := client.GetMediaInfo(ctx)
+		
+		// Fetch EQ and Audio modes for web sync
+		bass, _ := client.GetEQ(ctx, "Bass")
+		treble, _ := client.GetEQ(ctx, "Treble")
+		loud, _ := client.GetLoudness(ctx)
+		night, _ := client.GetNightMode(ctx)
+		speech, _ := client.GetSpeechEnhancement(ctx)
+		gvol, _ := client.GetGroupVolume(ctx)
+		gmute, _ := client.GetGroupMute(ctx)
+
+		fyne.Do(func() {
+			if err == nil {
+				uri := strings.ToLower(pos.TrackURI)
+				if strings.Contains(uri, "htastream") || strings.Contains(uri, "hdmi") || strings.Contains(uri, "spdif") {
+					ui.TrackLabel.SetText("TV Audio")
+					ui.ArtistLabel.SetText("")
+					ui.AlbumArt.Resource = theme.MediaVideoIcon()
+					ui.Progress.Hide()
+					ui.TimeLabel.Hide()
+				} else if strings.Contains(uri, "line-in") || strings.Contains(uri, "linein") {
+					ui.TrackLabel.SetText("Line-In")
+					ui.ArtistLabel.SetText("")
+					ui.AlbumArt.Resource = theme.SettingsIcon()
+					ui.Progress.Hide()
+				} else {
+					it, ok := sonos.ParseNowPlaying(pos.TrackMeta)
+					
+					// If PositionInfo gives us garbage (a URL as a title), check MediaInfo
+					if ok && (strings.Contains(it.Title, "?") || strings.Contains(it.Title, ".mp3")) && len(it.Title) > 100 {
+						if mit, mok := sonos.ParseNowPlaying(media.CurrentURIMetaData); mok {
+							if mit.Title != "" && !strings.Contains(mit.Title, "?") {
+								it = mit
+							}
+						}
+					}
+					
+					if ok {
+						title := it.Title
+						artist := it.Artist
+						slog.Info("Now playing parsed", "title", title, "artist", artist, "uri", pos.TrackURI)
+
+						ui.TrackLabel.SetText(title)
+						ui.ArtistLabel.SetText(artist)
+
+						if it.AlbumArtURI != "" {
+							artURL := sonos.AlbumArtURL(ip, it.AlbumArtURI)
+							go func(targetUI *RoomUI, url string) {
+								res, err := fyne.LoadResourceFromURLString(url)
+								if err == nil {
+									fyne.Do(func() {
+										targetUI.AlbumArt.Resource = res
+										targetUI.AlbumArt.Refresh()
+									})
+								}
+							}(ui, artURL)
+						} else {
+							ui.AlbumArt.Resource = theme.MediaMusicIcon()
+						}
+
+						dur := parseDuration(pos.TrackDuration)
+						rel := parseDuration(pos.RelTime)
+						if dur > 0 {
+							ui.Progress.Show()
+							ui.TimeLabel.Show()
+							ui.Progress.SetValue(float64(rel) / float64(dur) * 100)
+							ui.TimeLabel.SetText(fmt.Sprintf("%s / %s", pos.RelTime, pos.TrackDuration))
+						} else {
+							ui.Progress.Hide()
+							ui.TimeLabel.Hide()
+						}
+					} else {
+						ui.TrackLabel.SetText("No Track")
+						ui.ArtistLabel.SetText("")
+						ui.AlbumArt.Resource = theme.MediaMusicIcon()
+						ui.Progress.Hide()
+						ui.TimeLabel.Hide()
+					}
+				}
+				ui.AlbumArt.Refresh()
+			}
+
+			ui.VolSlider.SetValue(float64(vol))
+
+			if info.State == "PLAYING" {
+				ui.PlayPauseBtn.SetIcon(theme.MediaPauseIcon())
+			} else {
+				ui.PlayPauseBtn.SetIcon(theme.MediaPlayIcon())
+			}
+			
+			// Push update to Web Server if running
+			if sa.WebSrv != nil {
+				// Capture current state to avoid race conditions with GUI thread
+				roomID := ui.RoomID
+				roomName := ""
+				for _, g := range sa.Topology.Groups {
+					if g.ID == roomID {
+						roomName = g.Coordinator.Name
+						break
 					}
 				}
 				
-				dur := parseDuration(pos.TrackDuration)
-				rel := parseDuration(pos.RelTime)
-				if dur > 0 {
-					ui.Progress.Show()
-					ui.TimeLabel.Show()
-					ui.Progress.SetValue(float64(rel) / float64(dur) * 100)
-					ui.TimeLabel.SetText(fmt.Sprintf("%s / %s", pos.RelTime, pos.TrackDuration))
-				} else {
-					ui.Progress.Hide()
-					ui.TimeLabel.Hide()
+				title := "No Track"
+				artist := ""
+				album := ""
+				art := ""
+				
+				uri := strings.ToLower(pos.TrackURI)
+				slog.Info("Web broadcast URI check", "uri", uri, "meta", pos.TrackMeta)
+				if strings.Contains(uri, "htastream") || strings.Contains(uri, "hdmi") || strings.Contains(uri, "spdif") || strings.Contains(uri, "arc") {
+					title = "TV Audio"
+				} else if strings.Contains(uri, "line-in") || strings.Contains(uri, "linein") || strings.Contains(uri, "analog") {
+					title = "Line-In"
+				} else if it, ok := sonos.ParseNowPlaying(pos.TrackMeta); ok {
+					// Apply the same fallback logic we use for GUI
+					if (strings.Contains(it.Title, "?") || strings.Contains(it.Title, ".mp3")) && len(it.Title) > 100 {
+						if mit, mok := sonos.ParseNowPlaying(media.CurrentURIMetaData); mok {
+							if mit.Title != "" && !strings.Contains(mit.Title, "?") {
+								it = mit
+							}
+						}
+					}
+					title = it.Title
+					artist = it.Artist
+					album = it.Album
+					if it.AlbumArtURI != "" {
+						art = sonos.AlbumArtURL(ip, it.AlbumArtURI)
+					}
 				}
-			} else {
-				ui.TrackLabel.SetText("No Track")
-				ui.ArtistLabel.SetText("")
-				ui.AlbumArt.Resource = theme.BrokenImageIcon()
-				ui.Progress.Hide()
-				ui.TimeLabel.Hide()
+
+				status := web.RoomStatus{
+					ID:                roomID,
+					Name:              roomName,
+					Track:             title,
+					Artist:            artist,
+					Album:             album,
+					AlbumArt:          art,
+					State:             info.State,
+					Volume:            vol,
+					PositionSeconds:   int(parseDuration(pos.RelTime).Seconds()),
+					DurationSeconds:   int(parseDuration(pos.TrackDuration).Seconds()),
+					Bass:              bass,
+					Treble:            treble,
+					Loudness:          loud,
+					NightMode:         night,
+					SpeechEnhancement: speech,
+					GroupVolume:       gvol,
+					GroupMute:         gmute,
+				}
+				
+				slog.Info("Broadcasting to web", "room", roomID, "title", title, "uri", uri)
+				go sa.WebSrv.BroadcastRoomUpdate(roomID, status)
 			}
-			ui.AlbumArt.Refresh()
-		}
-		
-		ui.VolSlider.SetValue(float64(vol))
-		
-		if info.State == "PLAYING" {
-			ui.PlayPauseBtn.SetIcon(theme.MediaPauseIcon())
-		} else {
-			ui.PlayPauseBtn.SetIcon(theme.MediaPlayIcon())
-		}
-	})
+		})
+	}()
 }
 
 func (sa *SonosApp) updateQueue(ui *RoomUI, ip string) {
 	client := sonos.NewClient(ip, 2*time.Second)
 	ctx := context.Background()
 	q, err := client.ListQueue(ctx, 0, 50)
-	if err != nil { return }
+	if err != nil {
+		return
+	}
 
 	fyne.Do(func() {
 		ui.QueueList.Objects = nil
 		for _, item := range q.Items {
 			it := item
-			btn := widget.NewButton(fmt.Sprintf("%d. %s - %s", it.Position, it.Item.Title, it.Item.Artist), func() {
+			txt := fmt.Sprintf("%d. %s", it.Position, it.Item.Title)
+			if it.Item.Artist != "" {
+				txt += " - " + it.Item.Artist
+			}
+			btn := widget.NewButton(truncate(txt, 64), func() {
 				go func() {
 					client.PlayQueuePosition(context.Background(), it.Position)
 					sa.updateRoomStatus(ui, ip)
@@ -718,13 +956,15 @@ func (sa *SonosApp) updateFavorites(ui *RoomUI, ip string) {
 	client := sonos.NewClient(ip, 2*time.Second)
 	ctx := context.Background()
 	favs, err := client.ListFavorites(ctx, 0, 50)
-	if err != nil { return }
+	if err != nil {
+		return
+	}
 
 	fyne.Do(func() {
 		ui.FavoritesList.Objects = nil
 		for _, f := range favs.Items {
 			fav := f
-			btn := widget.NewButton(f.Item.Title, func() {
+			btn := widget.NewButton(truncate(f.Item.Title, 64), func() {
 				go func() {
 					client.PlayFavorite(context.Background(), fav.Item)
 					sa.updateRoomStatus(ui, ip)
@@ -739,13 +979,13 @@ func (sa *SonosApp) updateFavorites(ui *RoomUI, ip string) {
 func (sa *SonosApp) updateAudioSettingsUI(ui *RoomUI, ip string) {
 	client := sonos.NewClient(ip, 2*time.Second)
 	ctx := context.Background()
-	
+
 	bass, _ := client.GetEQ(ctx, "Bass")
 	treble, _ := client.GetEQ(ctx, "Treble")
 	loud, _ := client.GetLoudness(ctx)
 	night, _ := client.GetNightMode(ctx)
 	speech, _ := client.GetSpeechEnhancement(ctx)
-	
+
 	supportsFixed, _ := client.GetSupportsOutputFixed(ctx)
 	fixedMode := -1
 	if supportsFixed {
@@ -755,17 +995,32 @@ func (sa *SonosApp) updateAudioSettingsUI(ui *RoomUI, ip string) {
 	fyne.Do(func() {
 		ui.BassSlider.SetValue(float64(bass))
 		ui.TrebleSlider.SetValue(float64(treble))
-		
-		if loud { ui.LoudnessBtn.Importance = widget.HighImportance } else { ui.LoudnessBtn.Importance = widget.MediumImportance }
-		if night { ui.NightBtn.Importance = widget.HighImportance } else { ui.NightBtn.Importance = widget.MediumImportance }
-		if speech { ui.SpeechBtn.Importance = widget.HighImportance } else { ui.SpeechBtn.Importance = widget.MediumImportance }
-		
+
+		if loud {
+			ui.LoudnessBtn.Importance = widget.HighImportance
+		} else {
+			ui.LoudnessBtn.Importance = widget.MediumImportance
+		}
+		if night {
+			ui.NightBtn.Importance = widget.HighImportance
+		} else {
+			ui.NightBtn.Importance = widget.MediumImportance
+		}
+		if speech {
+			ui.SpeechBtn.Importance = widget.HighImportance
+		} else {
+			ui.SpeechBtn.Importance = widget.MediumImportance
+		}
+
 		if supportsFixed {
 			ui.LineOutCard.Show()
 			switch fixedMode {
-			case 0: ui.LineOutSelect.SetSelected("Variable")
-			case 1: ui.LineOutSelect.SetSelected("Fixed")
-			case 2: ui.LineOutSelect.SetSelected("Pass-Through")
+			case 0:
+				ui.LineOutSelect.SetSelected("Variable")
+			case 1:
+				ui.LineOutSelect.SetSelected("Fixed")
+			case 2:
+				ui.LineOutSelect.SetSelected("Pass-Through")
 			}
 		} else {
 			ui.LineOutCard.Hide()
@@ -781,10 +1036,10 @@ func (sa *SonosApp) updateAudioSettingsUI(ui *RoomUI, ip string) {
 func (sa *SonosApp) updateGroups(ui *RoomUI, ip, id string) {
 	client := sonos.NewClient(ip, 2*time.Second)
 	ctx := context.Background()
-	
+
 	gvol, _ := client.GetGroupVolume(ctx)
 	gmute, _ := client.GetGroupMute(ctx)
-	
+
 	fyne.Do(func() {
 		ui.GroupVolSlider.SetValue(float64(gvol))
 		if gmute {
@@ -801,20 +1056,25 @@ func (sa *SonosApp) updateGroups(ui *RoomUI, ip, id string) {
 			btn := widget.NewButton(fmt.Sprintf("Join %s", g.Coordinator.Name), func() {
 				go func() {
 					client.JoinGroup(context.Background(), group.Coordinator.UUID)
-					sa.Discover()
+					sa.RefreshTopology()
 				}()
 			})
 			isSelf := false
 			for _, m := range g.Members {
-				if m.UUID == id { isSelf = true; break }
+				if m.UUID == id {
+					isSelf = true
+					break
+				}
 			}
-			if !isSelf { ui.GroupList.Add(btn) }
+			if !isSelf {
+				ui.GroupList.Add(btn)
+			}
 		}
-		
+
 		leaveBtn := widget.NewButtonWithIcon("Leave Group (Solo)", theme.ContentRemoveIcon(), func() {
 			go func() {
 				client.LeaveGroup(context.Background())
-				sa.Discover()
+				sa.RefreshTopology()
 			}()
 		})
 		ui.GroupList.Add(widget.NewSeparator())
@@ -866,8 +1126,12 @@ func (sa *SonosApp) doSaveScene(name string) {
 		coord := g.Coordinator
 		memberUUIDs := make([]string, 0, len(g.Members))
 		for _, m := range g.Members {
-			if !m.IsVisible { continue }
-			if m.UUID != "" { memberUUIDs = append(memberUUIDs, m.UUID) }
+			if !m.IsVisible {
+				continue
+			}
+			if m.UUID != "" {
+				memberUUIDs = append(memberUUIDs, m.UUID)
+			}
 		}
 		sort.Strings(memberUUIDs)
 		scene.Groups = append(scene.Groups, scenes.SceneGroup{
@@ -881,7 +1145,9 @@ func (sa *SonosApp) doSaveScene(name string) {
 	seen := map[string]bool{}
 	for _, g := range sa.Topology.Groups {
 		for _, m := range g.Members {
-			if !m.IsVisible || m.UUID == "" || seen[m.UUID] { continue }
+			if !m.IsVisible || m.UUID == "" || seen[m.UUID] {
+				continue
+			}
 			seen[m.UUID] = true
 			c := sonos.NewClient(m.IP, 2*time.Second)
 			vol, _ := c.GetVolume(ctx)
@@ -900,43 +1166,59 @@ func (sa *SonosApp) doSaveScene(name string) {
 
 func (sa *SonosApp) applyScene(name string) {
 	scene, ok, _ := sa.ScenesStore.Get(name)
-	if !ok { return }
-	
+	if !ok {
+		return
+	}
+
 	fyne.Do(func() { sa.StatusLabel.SetText(fmt.Sprintf("Applying scene %s...", name)) })
-	
+
 	go func() {
 		ctx := context.Background()
 		timeout := 2 * time.Second
 		uuidToIP := map[string]string{}
 		for _, m := range sa.Topology.ByIP {
-			if m.UUID != "" { uuidToIP[m.UUID] = m.IP }
-		}
-
-		for _, dev := range scene.Devices {
-			ip := uuidToIP[dev.UUID]
-			if ip == "" { ip = dev.IP }
-			if ip != "" { _ = sonos.NewClient(ip, timeout).LeaveGroup(ctx) }
-		}
-
-		for _, g := range scene.Groups {
-			if g.CoordinatorUUID == "" { continue }
-			for _, memberUUID := range g.MemberUUIDs {
-				if memberUUID == "" || memberUUID == g.CoordinatorUUID { continue }
-				memberIP := uuidToIP[memberUUID]
-				if memberIP != "" { _ = sonos.NewClient(memberIP, timeout).JoinGroup(ctx, g.CoordinatorUUID) }
+			if m.UUID != "" {
+				uuidToIP[m.UUID] = m.IP
 			}
 		}
 
 		for _, dev := range scene.Devices {
 			ip := uuidToIP[dev.UUID]
-			if ip == "" { ip = dev.IP }
+			if ip == "" {
+				ip = dev.IP
+			}
+			if ip != "" {
+				_ = sonos.NewClient(ip, timeout).LeaveGroup(ctx)
+			}
+		}
+
+		for _, g := range scene.Groups {
+			if g.CoordinatorUUID == "" {
+				continue
+			}
+			for _, memberUUID := range g.MemberUUIDs {
+				if memberUUID == "" || memberUUID == g.CoordinatorUUID {
+					continue
+				}
+				memberIP := uuidToIP[memberUUID]
+				if memberIP != "" {
+					_ = sonos.NewClient(memberIP, timeout).JoinGroup(ctx, g.CoordinatorUUID)
+				}
+			}
+		}
+
+		for _, dev := range scene.Devices {
+			ip := uuidToIP[dev.UUID]
+			if ip == "" {
+				ip = dev.IP
+			}
 			if ip != "" {
 				c := sonos.NewClient(ip, timeout)
 				_ = c.SetMute(ctx, dev.Mute)
 				_ = c.SetVolume(ctx, dev.Volume)
 			}
 		}
-		sa.Discover()
+		sa.RefreshTopology()
 	}()
 }
 

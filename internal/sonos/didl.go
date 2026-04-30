@@ -85,6 +85,10 @@ func parseDIDLItem(dec *xml.Decoder, start xml.StartElement) (DIDLItem, error) {
 				if it.Title == "" {
 					it.Title = val
 				}
+			case "streamcontent":
+				if val != "" {
+					it.Title = val
+				}
 			case "res":
 				if it.URI == "" {
 					it.URI = val
@@ -97,7 +101,7 @@ func parseDIDLItem(dec *xml.Decoder, start xml.StartElement) (DIDLItem, error) {
 				if it.Class == "" {
 					it.Class = val
 				}
-			case "artist", "creator":
+			case "artist", "creator", "channelname":
 				if it.Artist == "" {
 					it.Artist = val
 				}

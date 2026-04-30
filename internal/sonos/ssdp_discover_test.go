@@ -50,6 +50,7 @@ func (c *fakeSSDPConn) ReadFromUDP(b []byte) (int, *net.UDPAddr, error) {
 }
 
 func (c *fakeSSDPConn) SetReadDeadline(t time.Time) error { return nil }
+func (c *fakeSSDPConn) LocalAddr() net.Addr                { return &net.UDPAddr{IP: net.IPv4zero, Port: 0} }
 func (c *fakeSSDPConn) Close() error                      { return nil }
 
 func TestSSDPDiscover_SendsAndCollects(t *testing.T) {

@@ -11,8 +11,12 @@ func AlbumArtURL(deviceIP string, albumArtURI string) string {
 	if strings.HasPrefix(albumArtURI, "http://") || strings.HasPrefix(albumArtURI, "https://") {
 		return albumArtURI
 	}
-	if strings.HasPrefix(albumArtURI, "/") && strings.TrimSpace(deviceIP) != "" {
-		return "http://" + deviceIP + ":1400" + albumArtURI
+	if strings.TrimSpace(deviceIP) != "" {
+		path := albumArtURI
+		if !strings.HasPrefix(path, "/") {
+			path = "/" + path
+		}
+		return "http://" + deviceIP + ":1400" + path
 	}
 	return albumArtURI
 }

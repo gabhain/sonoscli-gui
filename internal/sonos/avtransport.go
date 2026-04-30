@@ -199,3 +199,21 @@ func (c *Client) GetTransportInfo(ctx context.Context) (TransportInfo, error) {
 		Speed:  resp["CurrentSpeed"],
 	}, nil
 }
+
+type MediaInfo struct {
+	CurrentURI         string
+	CurrentURIMetaData string
+}
+
+func (c *Client) GetMediaInfo(ctx context.Context) (MediaInfo, error) {
+	resp, err := c.soapCall(ctx, controlAVTransport, urnAVTransport, "GetMediaInfo", map[string]string{
+		"InstanceID": "0",
+	})
+	if err != nil {
+		return MediaInfo{}, err
+	}
+	return MediaInfo{
+		CurrentURI:         resp["CurrentURI"],
+		CurrentURIMetaData: resp["CurrentURIMetaData"],
+	}, nil
+}

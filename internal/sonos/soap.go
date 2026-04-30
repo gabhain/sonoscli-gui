@@ -54,6 +54,7 @@ func soapCall(ctx context.Context, httpClient *http.Client, endpointURL, service
 		return parseSOAPResponse(raw)
 	}
 	if resp.StatusCode == 500 {
+		slog.Debug("soap: error body", "action", action, "body", string(raw))
 		if upnpErr, ok := parseUPnPError(raw); ok {
 			return nil, upnpErr
 		}

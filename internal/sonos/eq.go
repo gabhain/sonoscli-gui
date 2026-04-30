@@ -6,10 +6,14 @@ import (
 )
 
 func (c *Client) GetEQ(ctx context.Context, eqType string) (int, error) {
-	resp, err := c.soapCall(ctx, controlRenderingControl, urnRenderingControl, "GetEQ", map[string]string{
+	args := map[string]string{
 		"InstanceID": "0",
 		"EQType":     eqType,
-	})
+	}
+	if eqType != "NightMode" && eqType != "DialogLevel" {
+		args["Channel"] = "Master"
+	}
+	resp, err := c.soapCall(ctx, controlRenderingControl, urnRenderingControl, "GetEQ", args)
 	if err != nil {
 		return 0, err
 	}
@@ -18,11 +22,13 @@ func (c *Client) GetEQ(ctx context.Context, eqType string) (int, error) {
 }
 
 func (c *Client) SetEQ(ctx context.Context, eqType string, value int) error {
-	_, err := c.soapCall(ctx, controlRenderingControl, urnRenderingControl, "SetEQ", map[string]string{
+	args := map[string]string{
 		"InstanceID":   "0",
 		"EQType":       eqType,
+		"Channel":      "Master",
 		"DesiredValue": strconv.Itoa(value),
-	})
+	}
+	_, err := c.soapCall(ctx, controlRenderingControl, urnRenderingControl, "SetEQ", args)
 	return err
 }
 

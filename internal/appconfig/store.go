@@ -14,6 +14,7 @@ type Config struct {
 	Format      string   `json:"format,omitempty"`
 	KnownIPs    []string `json:"knownIPs,omitempty"`
 	LastRoomID  string   `json:"lastRoomID,omitempty"`
+	UIScale     float32  `json:"uiScale,omitempty"`
 }
 
 func (c Config) Normalize() Config {
@@ -22,12 +23,16 @@ func (c Config) Normalize() Config {
 		Format:      strings.ToLower(strings.TrimSpace(c.Format)),
 		KnownIPs:    c.KnownIPs,
 		LastRoomID:  strings.TrimSpace(c.LastRoomID),
+		UIScale:     c.UIScale,
 	}
 	if out.Format == "" {
 		out.Format = "plain"
 	}
 	if !isValidFormat(out.Format) {
 		out.Format = "plain"
+	}
+	if out.UIScale < 0.5 || out.UIScale > 3.0 {
+		out.UIScale = 1.0
 	}
 	return out
 }

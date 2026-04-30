@@ -68,26 +68,25 @@ func (em *EventManager) handleNotify(w http.ResponseWriter, r *http.Request) {
 	// We don't even need to map SID if we just update the current room, 
 	// but better to be precise. For now, let's just trigger a room refresh.
 	if em.sa.CurrentRoomID != "" {
+		// Existing GUI refresh
 		ui := em.sa.RoomUI[em.sa.CurrentRoomID]
 		if ui != nil {
-			// Find IP for current room
 			var ip string
 			for _, g := range em.sa.Topology.Groups {
 				if g.ID == em.sa.CurrentRoomID {
 					ip = g.Coordinator.IP
 					break
 				}
-				for _, m := range g.Members {
-					if m.UUID == em.sa.CurrentRoomID {
-						ip = m.IP
-						break
-					}
-				}
 			}
 			if ip != "" {
 				go em.sa.updateRoomStatus(ui, ip)
 			}
 		}
+	}
+	
+	// Notify Web Server
+	if em.sa.WebSrv != nil {
+		em.sa.WebSrv.BroadcastRefreshHint()
 	}
 	
 	w.WriteHeader(http.StatusOK)

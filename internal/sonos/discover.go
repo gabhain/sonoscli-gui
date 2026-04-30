@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
-	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -54,63 +53,27 @@ func Discover(ctx context.Context, opts DiscoverOptions) ([]Device, error) {
 	ssdpCtx, cancelSSDP := context.WithTimeout(opCtx, ssdpTimeout)
 	ssdpResults, err := ssdpDiscoverFunc(ssdpCtx, ssdpTimeout)
 	cancelSSDP()
-	if err != nil && !errors.Is(err, context.DeadlineExceeded) {
-		return nil, err
-	}
-	slog.Debug("discover: ssdp finished", "timeout", ssdpTimeout.String(), "results", len(ssdpResults), "err", errString(err))
 
-	// Prefer the topology-based approach (query one speaker for the full list),
-	// since not every speaker will reliably respond to SSDP M-SEARCH.
-	out, err := discoverViaTopologyFunc(opCtx, timeout, ssdpResults, opts.IncludeInvisible)
-	if err == nil && len(out) > 0 {
-		slog.Debug("discover: topology via ssdp candidates succeeded", "devices", len(out))
-		return out, nil
+	if err == nil {
+		slog.Debug("discover: ssdp finished", "results", len(ssdpResults))
+		out, err := discoverViaTopologyFunc(opCtx, timeout, ssdpResults, opts.IncludeInvisible)
+		if err == nil && len(out) > 0 {
+			return out, nil
+		}
+	} else {
+		slog.Debug("discover: ssdp failed", "err", errString(err))
 	}
-	slog.Debug("discover: topology via ssdp candidates failed", "err", errString(err))
 
-	// SSDP sometimes fails or returns incomplete results on certain networks.
-	// Fall back to finding any reachable Sonos speaker, then query topology.
+	// Fall back to subnet scan
 	if anyIP, scanErr := scanAnySpeakerIPFunc(opCtx, timeout); scanErr == nil && anyIP != "" {
 		slog.Debug("discover: subnet scan found a speaker", "ip", anyIP)
 		out, topErr := discoverViaTopologyFromIPFunc(opCtx, timeout, anyIP, opts.IncludeInvisible)
 		if topErr == nil && len(out) > 0 {
-			slog.Debug("discover: topology via scanned speaker succeeded", "devices", len(out))
 			return out, nil
 		}
-		slog.Debug("discover: topology via scanned speaker failed", "ip", anyIP, "err", errString(topErr))
 	}
 
-	// Fallback: resolve each SSDP response directly.
-	httpClient := defaultHTTPClient(timeout)
-	byIP := map[string]Device{}
-	for _, r := range ssdpResults {
-		location := r.Location
-		if location == "" {
-			continue
-		}
-		if _, err := url.Parse(location); err != nil {
-			continue
-		}
-
-		name, udn, ip, err := fetchDeviceDescriptionFunc(opCtx, httpClient, location)
-		if err != nil {
-			continue
-		}
-		if ip == "" {
-			continue
-		}
-		if name == "" {
-			name = ip
-		}
-		byIP[ip] = Device{
-			IP:       ip,
-			Name:     name,
-			UDN:      udn,
-			Location: location,
-		}
-	}
-
-	return sortDevices(byIP), nil
+	return nil, errors.New("no speakers found")
 }
 
 func discoverViaTopologyFromIP(ctx context.Context, timeout time.Duration, ip string, includeInvisible bool) ([]Device, error) {
@@ -351,6 +314,7 @@ func localIPv4Addrs() ([]net.IP, error) {
 		}
 		addrs, err := ifaceAddrsFunc(iface)
 		if err != nil {
+			slog.Debug("discover: failed to get addresses for interface", "iface", iface.Name, "err", err)
 			continue
 		}
 		for _, a := range addrs {
@@ -362,6 +326,7 @@ func localIPv4Addrs() ([]net.IP, error) {
 			if ip4 == nil {
 				continue
 			}
+			slog.Debug("discover: found interface", "name", iface.Name, "ip", ip4.String())
 			ips = append(ips, ip4)
 		}
 	}

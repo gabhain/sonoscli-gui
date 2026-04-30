@@ -75,7 +75,15 @@ func shouldCurlFallback(req *http.Request, err error) bool {
 	if req.URL.Scheme != "http" && req.URL.Scheme != "https" {
 		return false
 	}
-	return isTimeoutLike(err)
+	return isTimeoutLike(err) || isNoRouteToHost(err)
+}
+
+func isNoRouteToHost(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "no route to host") || strings.Contains(msg, "socket: shutdown")
 }
 
 func isTimeoutLike(err error) bool {

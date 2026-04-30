@@ -18,8 +18,18 @@ This project provides a sleek and intuitive visual interface for managing your S
 - **Favorites & Queue Management**: Quick access to your Sonos Favorites and full visibility/control of the current playback queue.
 - **Physical Inputs**: Switch to TV (HDMI/Optical) or Line-In inputs with a single click.
 - **System Scenes**: Save your entire system's state—including grouping and volume levels—and restore it instantly.
+- **Web Remote Control**: A built-in, mobile-friendly web dashboard accessible from any device on your network.
+  - Real-time synchronization with the desktop application.
+  - Full playback, volume, and EQ control from your phone or tablet browser.
+  - No additional setup required—starts automatically with the main app.
 
-## 📦 Installation
+## 📱 Web Remote Control
+
+The application includes a sleek, real-time web interface. Once the main application is running, you can access the remote control from any device on your local network:
+
+1.  Open your browser to `http://localhost:8081` (or use your computer's local IP address).
+2.  The web UI provides a mobile-optimized view of your entire system, perfect for controlling music from your couch.
+3.  Changes made on the web are reflected instantly in the desktop app and vice versa.
 
 ### Prerequisites
 - **Go 1.26+**
@@ -69,6 +79,7 @@ fyne package -os darwin -icon Icon.png
 ### Project Structure
 - `main.go`: Entry point and UI orchestration.
 - `internal/sonos/`: Core UPnP/SOAP protocol implementations for Sonos.
+- `internal/web/`: High-performance Go web server and static assets for the remote dashboard.
 - `internal/scenes/`: Logic for saving and restoring system states.
 - `internal/appconfig/`: Persistent application configuration.
 
